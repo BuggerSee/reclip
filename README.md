@@ -7,7 +7,7 @@ A self-hosted, open-source video and audio downloader with a clean web UI. Paste
 
 https://github.com/user-attachments/assets/419d3e50-c933-444b-8cab-a9724986ba05
 
-<img src="assets/preview-mp3.png" width="600">
+![ReClip MP3 Mode](assets/preview-mp3.png)
 
 ## Features
 
