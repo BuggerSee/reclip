@@ -22,9 +22,10 @@ def run_download(job_id, url, format_choice, format_id):
     if format_choice == "audio":
         cmd += ["-x", "--audio-format", "mp3"]
     elif format_id:
-        cmd += ["-f", f"{format_id}+bestaudio/best", "--merge-output-format", "mp4"]
+        cmd += ["-f", f"{format_id}+bestaudio/best", "-S", "vcodec:h264",
+                "--merge-output-format", "mp4"]
     else:
-        cmd += ["-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4"]
+        cmd += ["-S", "vcodec:h264", "--merge-output-format", "mp4"]
 
     cmd.append(url)
 
@@ -47,6 +48,38 @@ def run_download(job_id, url, format_choice, format_id):
         else:
             target = [f for f in files if f.endswith(".mp4")]
             chosen = target[0] if target else files[0]
+
+        # Re-encode to H.264 if source is VP9/AV1 (e.g. Instagram only serves VP9)
+        if format_choice != "audio" and chosen.endswith(".mp4"):
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=codec_name", "-of", "csv=p=0", chosen],
+                capture_output=True, text=True, timeout=30
+            )
+            codec = probe.stdout.strip()
+            if codec and codec != "h264":
+                h264_path = chosen.replace(".mp4", "_h264.mp4")
+                hw_cmd = [
+                    "ffmpeg", "-y", "-hwaccel", "vaapi",
+                    "-hwaccel_output_format", "vaapi",
+                    "-hwaccel_device", "/dev/dri/renderD128",
+                    "-i", chosen,
+                    "-c:v", "h264_vaapi", "-qp", "23",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-movflags", "+faststart", h264_path
+                ]
+                sw_cmd = [
+                    "ffmpeg", "-y", "-i", chosen,
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-movflags", "+faststart", h264_path
+                ]
+                reencode = subprocess.run(hw_cmd, capture_output=True, text=True, timeout=300)
+                if reencode.returncode != 0:
+                    reencode = subprocess.run(sw_cmd, capture_output=True, text=True, timeout=600)
+                if reencode.returncode == 0:
+                    os.remove(chosen)
+                    os.rename(h264_path, chosen)
 
         for f in files:
             if f != chosen:
@@ -93,14 +126,23 @@ def get_info():
 
         info = json.loads(result.stdout)
 
-        # Build quality options — keep best format per resolution
+        # Build quality options — keep best H.264 format per resolution, fall back to any codec
         best_by_height = {}
         for f in info.get("formats", []):
             height = f.get("height")
             if height and f.get("vcodec", "none") != "none":
+                vcodec = f.get("vcodec", "")
+                is_h264 = vcodec.startswith("avc")
                 tbr = f.get("tbr") or 0
-                if height not in best_by_height or tbr > (best_by_height[height].get("tbr") or 0):
+                existing = best_by_height.get(height)
+                if not existing:
                     best_by_height[height] = f
+                else:
+                    existing_is_h264 = existing.get("vcodec", "").startswith("avc")
+                    if is_h264 and not existing_is_h264:
+                        best_by_height[height] = f
+                    elif is_h264 == existing_is_h264 and tbr > (existing.get("tbr") or 0):
+                        best_by_height[height] = f
 
         formats = []
         for height, f in best_by_height.items():
