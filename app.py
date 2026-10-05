@@ -64,6 +64,22 @@ def enforce_dir_size_limit():
         logger.info(f"Cleanup: removed {removed} file(s) to enforce size limit")
 
 
+def parse_ytdlp_json(stdout):
+    """Parse yt-dlp JSON output.
+
+    With ``-j`` yt-dlp prints one JSON object per line. Some extractors
+    emit multiple videos even with ``--no-playlist``, so stdout contains
+    several objects and a plain ``json.loads`` raises "Extra data".
+    Return the first valid object.
+    """
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        return json.loads(line)
+    raise ValueError("yt-dlp returned no data")
+
+
 def run_download(job_id, url, format_choice, format_id):
     job = jobs[job_id]
     out_template = os.path.join(DOWNLOAD_DIR, f"{job_id}.%(ext)s")
@@ -145,7 +161,7 @@ def run_download(job_id, url, format_choice, format_id):
         title = job.get("title", "").strip()
         # Sanitize title for filename
         if title:
-            safe_title = "".join(c for c in title if c not in r'\/:*?"<>|').strip()[:20].strip()
+            safe_title = "".join(c for c in title if c not in r'\/:*?"<>|').strip()[:100].strip()
             job["filename"] = f"{safe_title}{ext}" if safe_title else os.path.basename(chosen)
         else:
             job["filename"] = os.path.basename(chosen)
@@ -175,7 +191,7 @@ def get_info():
         if result.returncode != 0:
             return jsonify({"error": result.stderr.strip().split("\n")[-1]}), 400
 
-        info = json.loads(result.stdout)
+        info = parse_ytdlp_json(result.stdout)
 
         # Build quality options — keep best H.264 format per resolution, fall back to any codec
         best_by_height = {}
@@ -213,6 +229,29 @@ def get_info():
         })
     except subprocess.TimeoutExpired:
         return jsonify({"error": "Timed out fetching video info"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/playlist", methods=["POST"])
+def get_playlist_info():
+    data = request.json
+    url = data.get("url", "").strip()
+    if not url:
+        return jsonify({"error": "No URL provided"}), 400
+
+    cmd = ["yt-dlp", "--flat-playlist", "-J", url]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            return jsonify({"error": result.stderr.strip().split("\n")[-1]}), 400
+
+        info = json.loads(result.stdout)
+        entries = info.get("entries", [])
+        urls = [entry.get("url") for entry in entries if entry.get("url")]
+        return jsonify({"urls": urls})
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Timed out fetching playlist info"}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
